@@ -44,6 +44,52 @@ from .. import FakeBrowser
 from ...globals import PartHtmlError
 from ...globals import logger, DEBUG_OVERVIEW, DEBUG_DETAILED, DEBUG_OBSESSIVE
 
+from .. import distributor_dict
+
+def define_locale_currency(locale_iso=None, currency_iso=None):
+    '''@brief Configure the distributor for the country and currency intended.
+    
+    Scrape the configuration page and define the base URL of Mouser for the
+    currency and locale chosen.
+    The currency is predominant over the locale/country and the default are
+    currency='USD' and locale='US' for Mouser.
+    
+    @param locale_iso `str` Country in ISO3166 alpha 2 standard.
+    @param currency_iso `str` Currency in ISO4217 alpha 3 standard.'''
+    
+    # for now, just hard code the regional sites based on location only
+    region_options = {
+        "US" : ["USD", 'https://www.mouser.com'],
+        "NL" : ["EUR", 'https://nl.mouser.com'],
+        "UK" : ["EUR", 'https://ww.mouser.co.uk'],
+        "DE" : ["GBP", 'https://www.mouser.de']
+    }
+
+    # check if the requested country is in the dictionary
+    # if not, we check if there requested currency is EUR
+    # and redirect to eu.mouser.com if this is the case.
+    baseurl  = 'https://www.mouser.com'
+    currency = 'USD'
+    locale   = 'US'
+    if not locale_iso in region_options:
+        logger.warning('\tLocale not supported for Mouser')
+        if currency_iso == 'EUR':
+            baseurl  = 'https://eu.mouser.com'
+            currency = 'EUR'
+            locale   = 'EU'
+            logger.warning('\tSwitching to European site for Mouser')
+        else:
+            logger.warning('\tSwitching to US site for Mouser')
+    else:
+        currency = region_options[locale_iso][0]
+        baseurl  = region_options[locale_iso][1]
+        locale   = locale_iso
+            
+    distributor_dict['mouser']['site']['url'] = baseurl
+    distributor_dict['mouser']['site']['currency'] = currency  #pycountry.currencies.get(numeric=country.numeric).alpha_3
+    distributor_dict['mouser']['site']['locale'] = locale
+    logger.log(DEBUG_OBSESSIVE, 'Setting Mouser currency/locale to: %s %s', currency, locale)
+    return
 
 def get_price_tiers(html_tree):
     '''@brief Get the pricing tiers from the parsed tree of the Mouser product page.
@@ -58,7 +104,14 @@ def get_price_tiers(html_tree):
             qty_tree, unit_price_tree, _ = row_tree.find('div', class_='row').find_all('div', class_='col-xs-4')
             try:
                 qty = int(re.sub('[^0-9]', '', qty_tree.text))
-                unit_price = float(re.sub('[^0-9.]', '', unit_price_tree.text))
+                # FIXME: quick hack to deal with currency localization
+                # in EUR countries, the decimal point is the',' character.
+                if (distributor_dict['mouser']['site']['currency'] == 'EUR'):
+                    unit_price_str = re.sub('[^0-9,]', '', unit_price_tree.text)
+                    unit_price_str = re.sub(',','.', unit_price_str)
+                    unit_price = float(unit_price_str)
+                else:
+                    unit_price = float(re.sub('[^0-9.]', '', unit_price_tree.text))
                 price_tiers[qty] = unit_price
             except ValueError:
                 pass # In case of "quote price", ignore and pass to next (check pn STM32F411RCT6).
@@ -122,7 +175,11 @@ def get_qty_avail(html_tree):
         logger.log(DEBUG_OBSESSIVE, 'No Mouser part quantity found!')
         return None
     try:
-        qty_str = re.search('(\s*)([0-9,]*)', qty_str, re.IGNORECASE).group(2)
+        # quanitities will contain a '.' as the 1000 marker in EU
+        # or ',' in the US and some other countries
+        # quanitities are never fractional, so it is safe here
+        # to ignore both ',' and '.'
+        qty_str = re.search('(\s*)([0-9,.]*)', qty_str, re.IGNORECASE).group(2)
         return int(re.sub('[^0-9]', '', qty_str))
     except ValueError:
         # No quantity found (not even 0) so this is probably a non-stocked part.
@@ -145,17 +202,20 @@ def get_part_html_tree(dist, pn, extra_search_terms='', url=None, descend=2, loc
 
     # Use the part number to lookup the part using the site search function, unless a starting url was given.
     if url is None:
-        url = 'https://www.mouser.com/Search/Refine.aspx?Keyword=' + urlquote(
+        url = distributor_dict['mouser']['site']['url'] + '/Search/Refine.aspx?Keyword=' + urlquote(
             pn + ' ' + extra_search_terms,
             safe='')
     elif url[0] == '/':
-        url = 'https://www.mouser.com' + url
+        url = distributor_dict['mouser']['site']['url'] + url
     elif url.startswith('..'):
-        url = 'https://www.mouser.com/Search/' + url
+        url = distributor_dict['mouser']['site']['url'] + '/Search/' + url
 
     # Open the URL, read the HTML from it, and parse it into a tree structure.
     req = FakeBrowser(url)
-    req.add_header('Cookie', 'preferences=ps=www2&pl=en-US&pc_www2=USDe')
+
+    # do we actually need this cookie?
+    #req.add_header('Cookie', 'preferences=ps=www2&pl=en-US&pc_www2=USDe')
+
     for _ in range(scrape_retries):
         try:
             response = urlopen(req)
